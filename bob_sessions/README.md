@@ -1,0 +1,1 @@
+Real Bob IDE task session summary screenshots and exported task history go in this folder, per the IBM Bob 2.0 Hackathon guide. Never stage or fabricate a session — only add screenshots from sessions actually used to build this project.
