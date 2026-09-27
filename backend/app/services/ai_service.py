@@ -1,15 +1,17 @@
-"""Wraps IBM Watsonx / Granite calls for the Codebase Orientation pipeline.
+"""Wraps IBM Bob's hosted inference API for the Codebase Orientation pipeline.
 
-Falls back to deterministic mock responses when no Watsonx credentials are
-configured, so the architecture map and starter tasks work end-to-end
-without a live IBM Cloud account.
+Falls back to deterministic mock responses when no Bob API key is configured,
+so the architecture map and starter tasks work end-to-end without one.
 """
 
+import logging
 from dataclasses import dataclass
 
 import httpx
 
 from app.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -21,45 +23,36 @@ class AIResult:
 
 class AIService:
     def __init__(self) -> None:
-        self.enabled = bool(settings.watsonx_api_key and settings.watsonx_project_id)
-        self._iam_token: str | None = None
+        self.enabled = bool(settings.ibm_bob_api_key)
 
-    def _get_iam_token(self) -> str:
-        if self._iam_token:
-            return self._iam_token
+    def _call_bob(self, prompt: str, max_tokens: int = 200) -> AIResult:
         resp = httpx.post(
-            "https://iam.cloud.ibm.com/identity/token",
-            data={
-                "grant_type": "urn:ibm:params:oauth:grant-type:apikey",
-                "apikey": settings.watsonx_api_key,
-            },
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-            timeout=30,
-        )
-        resp.raise_for_status()
-        self._iam_token = resp.json()["access_token"]
-        return self._iam_token
-
-    def _call_granite(self, prompt: str, max_new_tokens: int = 200) -> AIResult:
-        token = self._get_iam_token()
-        resp = httpx.post(
-            f"{settings.watsonx_url}/ml/v1/text/generation?version=2023-05-29",
+            f"{settings.ibm_bob_base_url}/chat/completions",
             json={
-                "input": prompt,
-                "model_id": settings.watsonx_model_id,
-                "project_id": settings.watsonx_project_id,
-                "parameters": {"max_new_tokens": max_new_tokens, "decoding_method": "greedy"},
+                "model": settings.ibm_bob_model,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": max_tokens,
             },
-            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            headers={
+                "Authorization": f"Bearer {settings.ibm_bob_api_key}",
+                "Content-Type": "application/json",
+            },
             timeout=60,
         )
+        if resp.is_error:
+            logger.error(
+                "IBM Bob returned HTTP %s: %s",
+                resp.status_code,
+                resp.text[:500],
+            )
         resp.raise_for_status()
         data = resp.json()
-        result = data["results"][0]
+        choice = data["choices"][0]
+        usage = data.get("usage", {})
         return AIResult(
-            output=result["generated_text"].strip(),
-            tokens_used=result.get("generated_token_count", 0) + result.get("input_token_count", 0),
-            model=settings.watsonx_model_id,
+            output=choice["message"]["content"].strip(),
+            tokens_used=usage.get("total_tokens", 0),
+            model=settings.ibm_bob_model,
         )
 
     def _mock(self, prefix: str, prompt: str) -> AIResult:
@@ -73,17 +66,19 @@ class AIService:
     def summarize_module(self, prompt: str) -> AIResult:
         if self.enabled:
             try:
-                return self._call_granite(prompt)
+                return self._call_bob(prompt)
             except Exception:
-                # Demo-safe fallback: a Watsonx outage should never break the map.
+                # Demo-safe fallback: a gateway outage should never break the map.
+                logger.exception("IBM Bob call failed for module summary; falling back to mock")
                 return self._mock("module summary", prompt)
         return self._mock("module summary", prompt)
 
     def generate_task(self, prompt: str) -> AIResult:
         if self.enabled:
             try:
-                return self._call_granite(prompt)
+                return self._call_bob(prompt)
             except Exception:
+                logger.exception("IBM Bob call failed for starter task; falling back to mock")
                 return self._mock("starter task", prompt)
         return self._mock("starter task", prompt)
 
